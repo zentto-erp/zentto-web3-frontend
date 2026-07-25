@@ -39,6 +39,16 @@ export interface ZenttoDataGridProps {
   emptyMessage?: string;
   onRowClick?: (row: GridRow) => void;
   onActionClick?: (action: string, row: GridRow) => void;
+  /** Activa la columna de expansión maestro-detalle del grid. */
+  enableMasterDetail?: boolean;
+  /** Columnas del sub-grid de detalle (junto con `detailRowsAccessor`). */
+  detailColumns?: ColumnDef[];
+  /** Filas del detalle para una fila maestra (junto con `detailColumns`). */
+  detailRowsAccessor?: (row: GridRow) => GridRow[];
+  /** Alternativa: HTML del panel de detalle (si no hay columnas/accessor). */
+  detailRenderer?: (row: GridRow) => string;
+  /** Se dispara al expandir/colapsar una fila (evento `row-expand` del grid). */
+  onRowExpand?: (row: GridRow, expanded: boolean) => void;
 }
 
 declare module "react" {
@@ -75,6 +85,11 @@ function ZenttoGridInner({
   height = "auto",
   onRowClick,
   onActionClick,
+  enableMasterDetail = false,
+  detailColumns,
+  detailRowsAccessor,
+  detailRenderer,
+  onRowExpand,
 }: ZenttoDataGridProps) {
   const elRef = React.useRef<(HTMLElement & Record<string, unknown>) | null>(null);
   const [registered, setRegistered] = React.useState(false);
@@ -111,6 +126,10 @@ function ZenttoGridInner({
     el.pageSizeOptions = Array.from(
       new Set([pageSize, 10, 25, 50, 100].filter((n) => n > 0)),
     ).sort((a, b) => a - b);
+    el.enableMasterDetail = enableMasterDetail;
+    el.detailColumns = detailColumns;
+    el.detailRowsAccessor = detailRowsAccessor;
+    el.detailRenderer = detailRenderer;
     if (typeof height === "string" && height !== "auto") el.height = height;
   }, [
     registered,
@@ -123,6 +142,10 @@ function ZenttoGridInner({
     enableExport,
     pageSize,
     height,
+    enableMasterDetail,
+    detailColumns,
+    detailRowsAccessor,
+    detailRenderer,
   ]);
 
   // Eventos del grid -> callbacks React.
@@ -137,14 +160,20 @@ function ZenttoGridInner({
       const { action, row } = (e as CustomEvent).detail ?? {};
       onActionClick?.(action, row);
     };
+    const handleRowExpand = (e: Event) => {
+      const { row, expanded } = (e as CustomEvent).detail ?? {};
+      onRowExpand?.(row, Boolean(expanded));
+    };
 
     el.addEventListener("row-click", handleRowClick);
     el.addEventListener("action-click", handleActionClick);
+    el.addEventListener("row-expand", handleRowExpand);
     return () => {
       el.removeEventListener("row-click", handleRowClick);
       el.removeEventListener("action-click", handleActionClick);
+      el.removeEventListener("row-expand", handleRowExpand);
     };
-  }, [registered, onRowClick, onActionClick]);
+  }, [registered, onRowClick, onActionClick, onRowExpand]);
 
   if (!registered) return <GridSkeleton />;
 
