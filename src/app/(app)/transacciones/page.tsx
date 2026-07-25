@@ -20,13 +20,18 @@ import {
   type GridRow,
 } from "@/components/data-grid/ZenttoDataGrid";
 import { useAdminPayments } from "@/lib/hooks";
-import type { PaymentType } from "@/lib/types";
+import type { EvmTx, PaymentType } from "@/lib/types";
 import { shortHash } from "@/lib/format";
+import { api } from "@/lib/api";
+import { ENDPOINTS } from "@/lib/endpoints";
 
 /** ¿Es un hash on-chain? EVM (0x… 66 chars) o Tron (T… base58). */
 function isOnchainHash(v: string): boolean {
   return /^0x[0-9a-fA-F]{40,}$/.test(v) || /^T[1-9A-HJ-NP-Za-km-z]{25,}$/.test(v);
 }
+
+/** Hash de transacción EVM exacto (0x + 64 hex) — único formato que acepta GET /evm/tx/:hash. */
+const EVM_TX_RE = /^0x[0-9a-fA-F]{64}$/;
 
 /** Explorer por defecto (BSC mainnet) o derivado de la red de la fila si existe. */
 function explorerTxUrl(hash: string, network?: unknown): string {
@@ -85,6 +90,7 @@ export default function TransaccionesPage() {
     () =>
       data.map((p) => ({
         id: p.id,
+        userId: p.userId,
         email: p.email ?? "—",
         type: p.type,
         asset: p.asset,
@@ -146,6 +152,100 @@ export default function TransaccionesPage() {
     { field: "createdAt", header: "Fecha", type: "datetime", minWidth: 170 },
   ];
 
+  // ── Maestro-detalle: detalle del pago + estado on-chain (lazy + cache) ──
+  // No existe GET /admin/payments/:id en el backend; el detalle usa los campos
+  // completos que ya trae la lista y, si la contraparte es un hash EVM,
+  // consulta GET /evm/tx/:hash (estado real: confirmaciones, bloque, from/to).
+  const [txCache, setTxCache] = React.useState<
+    Record<string, EvmTx | "loading" | "error" | "na">
+  >({});
+  const txRequested = React.useRef<Set<string>>(new Set());
+
+  const handleRowExpand = React.useCallback((row: GridRow, expanded: boolean) => {
+    const id = String(row.id);
+    if (!expanded || txRequested.current.has(id)) return;
+    txRequested.current.add(id);
+    const cp = String(row.counterparty ?? "").trim();
+    if (!EVM_TX_RE.test(cp)) {
+      setTxCache((c) => ({ ...c, [id]: "na" }));
+      return;
+    }
+    setTxCache((c) => ({ ...c, [id]: "loading" }));
+    api
+      .get<EvmTx>(ENDPOINTS.evmTx(cp))
+      .then((tx) => setTxCache((c) => ({ ...c, [id]: tx })))
+      .catch(() => {
+        // permitir reintento al volver a expandir
+        txRequested.current.delete(id);
+        setTxCache((c) => ({ ...c, [id]: "error" }));
+      });
+  }, []);
+
+  const detailHtml = React.useCallback(
+    (row: GridRow): string => {
+      const id = String(row.id);
+      const cp = String(row.counterparty ?? "").trim();
+      const field = (label: string, value: string) =>
+        `<div style="min-width:180px;max-width:420px">` +
+        `<div style="font-size:11px;opacity:.65">${label}</div>` +
+        `<div style="font-size:13px;word-break:break-all">${value}</div></div>`;
+
+      const cpHtml =
+        !cp || cp === "—"
+          ? "—"
+          : isOnchainHash(cp)
+            ? `<a href="${esc(explorerTxUrl(cp, row.network))}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">${esc(cp)} ↗</a>`
+            : esc(cp);
+
+      const info = [
+        field("ID del pago", esc(id)),
+        field(
+          "Usuario",
+          `${esc(String(row.email ?? "—"))} <span style="opacity:.6">(${esc(String(row.userId ?? "—"))})</span>`,
+        ),
+        field("Tipo", esc(String(row.type ?? "—"))),
+        field("Monto", `${esc(String(row.amount ?? "—"))} ${esc(String(row.asset ?? ""))}`),
+        field("Estado", esc(String(row.status ?? "—"))),
+        field("Contraparte / hash", cpHtml),
+        field("Motivo de fallo", esc(String(row.failureReason ?? "—"))),
+      ].join("");
+
+      const entry = txCache[id];
+      let chain: string;
+      if (!EVM_TX_RE.test(cp)) {
+        chain = `<em style="opacity:.7">Sin traza on-chain EVM asociada (movimiento interno o hash no EVM).</em>`;
+      } else if (!entry || entry === "loading" || entry === "na") {
+        chain = `Consultando estado on-chain…`;
+      } else if (entry === "error") {
+        chain = `No se pudo consultar el estado on-chain. Colapsa y vuelve a expandir para reintentar.`;
+      } else {
+        const t = entry;
+        chain = [
+          field("Estado on-chain", esc(String(t.status ?? "—"))),
+          field("Confirmaciones", esc(String(t.confirmations ?? "0"))),
+          field("Bloque", esc(String(t.blockNumber ?? "—"))),
+          field("From", esc(String(t.from ?? "—"))),
+          field("To", esc(String(t.to ?? "—"))),
+          t.explorerUrl
+            ? field(
+                "Explorer",
+                `<a href="${esc(String(t.explorerUrl))}" target="_blank" rel="noopener noreferrer" style="text-decoration:underline">Ver en explorer ↗</a>`,
+              )
+            : "",
+        ].join("");
+      }
+
+      return (
+        `<div style="padding:12px 8px">` +
+        `<div style="display:flex;flex-wrap:wrap;gap:16px">${info}</div>` +
+        `<div style="margin-top:12px;font-size:11px;opacity:.65">Traza on-chain</div>` +
+        `<div style="display:flex;flex-wrap:wrap;gap:16px;margin-top:4px;font-size:13px">${chain}</div>` +
+        `</div>`
+      );
+    },
+    [txCache],
+  );
+
   return (
     <Box>
       <PageHeader
@@ -198,6 +298,9 @@ export default function TransaccionesPage() {
             loading={query.isLoading}
             pageSize={25}
             enableSearch
+            enableMasterDetail
+            detailRenderer={detailHtml}
+            onRowExpand={handleRowExpand}
           />
           {!query.isLoading && rows.length === 0 && !query.isError && (
             <Typography color="text.secondary" sx={{ mt: 2 }}>
