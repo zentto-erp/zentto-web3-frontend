@@ -35,6 +35,8 @@ import {
   useAdminP2pTradeMessages,
   useAdminP2pResolve,
 } from "@/lib/hooks";
+import { api } from "@/lib/api";
+import { ENDPOINTS } from "@/lib/endpoints";
 import { formatDate, fromNow } from "@/lib/format";
 import type {
   AdminP2pDispute,
@@ -110,6 +112,80 @@ export default function DisputasPage() {
     for (const d of data) m.set(d.id, d);
     return m;
   }, [data]);
+
+  // ── Maestro-detalle: chat del trade con carga perezosa + cache por fila ──
+  const [chatCache, setChatCache] = React.useState<
+    Record<string, AdminP2pMessage[] | "loading" | "error">
+  >({});
+  const chatRequested = React.useRef<Set<string>>(new Set());
+
+  const handleRowExpand = React.useCallback((row: GridRow, expanded: boolean) => {
+    const id = String(row.id);
+    if (!expanded || chatRequested.current.has(id)) return;
+    chatRequested.current.add(id);
+    setChatCache((c) => ({ ...c, [id]: "loading" }));
+    api
+      .get<AdminP2pMessage[]>(ENDPOINTS.adminP2pTradeMessages(id))
+      .then((msgs) => setChatCache((c) => ({ ...c, [id]: msgs ?? [] })))
+      .catch(() => {
+        // permitir reintento al volver a expandir
+        chatRequested.current.delete(id);
+        setChatCache((c) => ({ ...c, [id]: "error" }));
+      });
+  }, []);
+
+  const detailCols = React.useMemo<ColumnDef[]>(
+    () => [
+      { field: "remitente", header: "Remitente", minWidth: 230 },
+      { field: "mensaje", header: "Mensaje", minWidth: 320, flex: 1 },
+      {
+        field: "evidencia",
+        header: "Evidencia de pago",
+        minWidth: 170,
+        renderCell: (value) => {
+          const v = String(value ?? "");
+          if (!v.startsWith("data:image") && !/^https?:\/\//.test(v)) return "—";
+          return `<img src="${v}" alt="Evidencia de pago" style="max-height:64px;max-width:150px;border-radius:4px;display:block" />`;
+        },
+      },
+      { field: "fecha", header: "Fecha", type: "datetime", minWidth: 170 },
+    ],
+    [],
+  );
+
+  const detailRows = React.useCallback(
+    (row: GridRow): GridRow[] => {
+      const id = String(row.id);
+      const entry = chatCache[id];
+      const placeholder = (key: string, mensaje: string): GridRow[] => [
+        { id: `${id}-${key}`, remitente: "—", mensaje, evidencia: "", fecha: "" },
+      ];
+      if (!entry || entry === "loading") return placeholder("loading", "Cargando chat…");
+      if (entry === "error")
+        return placeholder("error", "No se pudo cargar el chat del trade. Colapsa y expande para reintentar.");
+      if (entry.length === 0)
+        return placeholder("empty", "Este trade no tiene mensajes en el chat.");
+      const d = byId.get(id);
+      return entry.map((m) => {
+        const remitente =
+          m.senderUserId === "system"
+            ? "Sistema (escrow)"
+            : d && m.senderUserId === d.buyerUserId
+              ? `Comprador · ${d.buyerEmail ?? m.senderUserId}`
+              : d && m.senderUserId === d.sellerUserId
+                ? `Vendedor · ${d.sellerEmail ?? m.senderUserId}`
+                : m.senderUserId;
+        return {
+          id: m.id,
+          remitente,
+          mensaje: m.body ?? (m.attachment ? "(evidencia adjunta)" : "(mensaje vacío)"),
+          evidencia: m.attachment ?? "",
+          fecha: toIso(m.createdAt),
+        };
+      });
+    },
+    [chatCache, byId],
+  );
 
   const rows: GridRow[] = React.useMemo(
     () =>
@@ -236,6 +312,10 @@ export default function DisputasPage() {
             loading={disputes.isLoading}
             pageSize={25}
             onActionClick={openDetail}
+            enableMasterDetail
+            detailColumns={detailCols}
+            detailRowsAccessor={detailRows}
+            onRowExpand={handleRowExpand}
           />
           {!disputes.isLoading && rows.length === 0 && !disputes.isError && (
             <Typography color="text.secondary" sx={{ mt: 2 }}>
